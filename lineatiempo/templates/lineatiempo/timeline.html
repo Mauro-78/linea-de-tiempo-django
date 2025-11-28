@@ -1,0 +1,534 @@
+{% extends "lineatiempo/base.html" %}
+{% block title %}Línea de Tiempo{% endblock %}
+
+{% block extra_head %}
+<link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+<style>
+    /* --- Estilos base --- */
+    .timeline-wrapper { max-width: 1400px; margin: 0 auto; }
+    
+    /* Nota importante: #event-details ya no debe tener 'margin: auto' */
+    #timeline { 
+        width: 100%; 
+        height: 700px; 
+        border: 1px solid #ccc; 
+        border-radius: 8px; 
+        background: #fff; 
+        margin-top: 20px; 
+        position: relative; 
+    }
+    
+    /* Configuración del Panel de Detalles (CRUCIAL para posicionamiento dinámico) */
+    #event-details { 
+        position: fixed; /* Cambiado de 'absolute' a 'fixed' para evitar problemas de scroll y posicionamiento relativo */
+        width: 480px; 
+        max-width: 90%; 
+        background: white; 
+        padding: 18px;
+        border-radius: 12px; 
+        box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+        z-index: 9999; 
+        display: none; 
+        opacity: 0;
+        transform: translateY(10px); 
+        transition: all .25s ease;
+        /* El JavaScript establecerá el 'top' y 'left', no necesitamos valores fijos aquí. */
+    }
+    
+    /* --- Estilos de Modales y Búsqueda --- */
+    body.dark-mode #event-details { background: #222 !important; color: #eee !important; border: 1px solid #444; }
+    .modal-categorias { display: none; position: fixed; inset: 0; z-index: 1050; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); padding-top: 100px; }
+    .modal-categorias .modal-content, .modal-buscar-content { width: 400px; margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+    body.dark-mode .modal-categorias .modal-content, body.dark-mode .modal-buscar-content { background: #222; color: #eee; }
+    .resultado-buscar { padding: 10px; cursor: pointer; border-bottom: 1px solid #eee; }
+    .resultado-buscar:hover { background: #f0f0f0; }
+    body.dark-mode .resultado-buscar:hover { background: #333; }
+    
+    /* ------------------------------------------------------------------ */
+    /* --- CORRECCIONES Y ESTILOS DE MODO NOCHE (Vis-Timeline y Global) --- */
+    /* ------------------------------------------------------------------ */
+
+    /* Reglas básicas para el cuerpo */
+    body.dark-mode {
+        background-color: #1a1a1a; /* Fondo muy oscuro */
+        color: #f1f1f1;            /* Texto muy claro */
+    }
+    
+    /* Invertir la barra de navegación de Bootstrap */
+    body.dark-mode .navbar-dark { 
+        background-color: #2c2c2c !important; 
+        border-bottom: 1px solid #444; 
+    }
+
+    /* Estilos para los elementos de Vis-Timeline (RESOLVIENDO EL FONDO BLANCO) */
+    
+    /* Fondo del contenedor de la línea de tiempo */
+    body.dark-mode #timeline { 
+        background-color: #1a1a1a !important; 
+        border-color: #444 !important;
+    }
+    
+    /* El panel central de la línea de tiempo (el área de dibujo principal) */
+    body.dark-mode .vis-timeline {
+        background-color: #1a1a1a !important;
+    }
+    
+    /* El panel de la izquierda (donde se muestran los grupos/categorías) */
+    /* 1. La regla que controla el fondo y el borde (que ya tienes) */
+    body.dark-mode .vis-panel.vis-left {
+        background-color: #222222 !important;
+        border-color: #444 !important;
+    }
+
+    /* 2. 🎯 La regla CRUCIAL para el color del texto de los grupos/categorías */
+    body.dark-mode .vis-group-content {
+        color: #f1f1f1 !important; /* Haz que el texto sea blanco o muy claro */
+    }
+
+    /* Opcional: Asegúrate de que el texto en los ejes de tiempo también esté claro */
+    body.dark-mode .vis-time-axis .vis-text {
+        color: #f1f1f1 !important;
+    }
+
+    /* Líneas de la cuadrícula y ejes */
+    body.dark-mode .vis-time-axis .vis-grid.vis-vertical,
+    body.dark-mode .vis-time-axis .vis-grid.vis-horizontal {
+        border-color: #3a3a3a !important; 
+    }
+    body.dark-mode .vis-time-axis.vis-axis {
+        border-color: #444444 !important;
+    }
+    
+    /* Invertir el botón "Categorías" de warning a oscuro */
+    body.dark-mode #btn-categorias {
+        background-color: #4b3e00 !important;
+        color: #ffc107 !important;
+        border-color: #ffc107;
+    }
+
+    /* Invertir los botones de Buscar y Ver Todo */
+    body.dark-mode .btn-info, 
+    body.dark-mode .btn-primary {
+        filter: brightness(1.2);
+    }
+
+    /* Invertir el botón del Modo Noche para que se vea diferente al estar activo/inactivo */
+    body.dark-mode #btn-dark {
+        background-color: #444 !important;
+        border-color: #666 !important;
+        color: white !important;
+    }
+    
+    /* Estilos de Modales y Detalles ya incluidos en tu original (confirmados) */
+    body.dark-mode .modal-categorias .modal-content, 
+    body.dark-mode .modal-buscar-content { background: #222; color: #eee; }
+    body.dark-mode #input-buscar { background-color: #333; color: #eee; border-color: #555; }
+    body.dark-mode .resultado-buscar:hover { background: #333; }
+    
+    /* Opcional: Oscurecer el contenedor principal si no es el body */
+    body.dark-mode .container-fluid { background: #1a1a1a; }
+    
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="text-center mb-4">
+    <h1 class="display-4">Línea de tiempo interactiva</h1>
+</div>
+
+<!-- MODALES -->
+<div id="modal-categorias" class="modal-categorias">
+    <div class="modal-content">
+        <h4>Categorías</h4>
+        <div id="lista-categorias"></div>
+        <div class="mt-3 d-flex gap-2">
+            <button id="btn-cats-todas" class="btn btn-light flex-fill">Todas</button>
+            <button id="btn-cats-aplicar" class="btn btn-success flex-fill">Aplicar</button>
+        </div>
+    </div>
+</div>
+
+<div id="modal-buscar" class="modal-categorias">
+    <div class="modal-buscar-content">
+        <h4>Buscar evento</h4>
+        <input type="text" id="input-buscar" class="form-control" placeholder="Escribe para buscar...">
+        <div id="resultados-buscar" class="mt-3"></div>
+    </div>
+</div>
+
+<div class="timeline-wrapper">
+    <div id="timeline"></div>
+</div>
+
+<div id="event-details">
+    <h4 id="detail-title"></h4>
+    <p id="detail-dates" class="text-muted"></p>
+    <p id="detail-category"></p>
+    <img id="detail-image" class="img-fluid rounded mb-2" style="display:none;">
+    <p id="detail-text" style="white-space:pre-wrap;"></p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", async () => {
+    const container = document.getElementById("timeline");
+    const panel = document.getElementById("event-details");
+    
+    // Declaramos dataset y timeline como null para que puedan ser redefinidos
+    let dataset = null;
+    let timeline = null; 
+    let allItems = []; // Almacenará el raw data del servidor
+
+    // --- FUNCIONES UTILITARIAS ---
+    const crearFecha = (y, m=1, d=1) => { 
+        const f = new Date(0); 
+        f.setUTCFullYear(y); 
+        f.setUTCMonth(m-1); 
+        f.setUTCDate(d); 
+        return f; 
+    };
+
+    const formatYear = y => y > 0 ? y + " d.C." : (y === 0 ? "1 a.C." : Math.abs(y) + " a.C.");
+    const linkify = t => (t||"").replace(/(https?:\/\/[^\s]+)/g, u => `<a href="${u}" target="_blank">${u}</a>`);
+    
+// --- FUNCIÓN DE FOCUS (BÚSQUEDA - VERSIÓN FINAL MÁS SEGURA) ---
+function seleccionarResultado(id, group) {
+    // 1. Mostrar el ítem si estaba oculto
+    dataset.update({ id: id, hidden: false });
+    dataset.forEach(i => {
+        if (i.group === group) {
+            dataset.update({ id: i.id, hidden: false });
+        }
+    });
+
+    timeline.redraw(); // Inicia el redibujado
+
+    // Damos un tiempo de espera suficiente para que el DOM se estabilice
+    setTimeout(() => {
+        try {
+            const item = dataset.get(id);
+            if (!item) {
+                 console.error(`Ítem con ID ${id} no encontrado.`);
+                 return;
+            }
+
+            // **Paso 2: Mover horizontalmente (Eje X) usando setWindow**
+            const itemDate = new Date(item.start);
+            
+            // Creamos un rango de 10 días centrado en la fecha del evento
+            const startWindow = new Date(itemDate.getTime() - (1000 * 60 * 60 * 24 * 5)); // 5 días antes
+            const endWindow = new Date(itemDate.getTime() + (1000 * 60 * 60 * 24 * 5));  // 5 días después
+            
+            // setWindow es más estable que focus(id)
+            timeline.setWindow(startWindow, endWindow, { 
+                animation: { duration: 1200, easingFunction: "easeInOutQuad" }
+            });
+
+
+            // **Paso 3: Calcular y Mover verticalmente (Eje Y) usando el DOM**
+            const itemElement = document.querySelector(`.vis-item[data-id="${id}"]`);
+
+            let targetY = null;
+            if (itemElement) {
+                const itemRect = itemElement.getBoundingClientRect();
+                const timelineCenterRect = timeline.dom.center.getBoundingClientRect();
+                const timelineHeight = timelineCenterRect.height;
+                
+                // Calculamos la posición Y para centrar el scroll
+                targetY = itemRect.top + window.scrollY - timelineCenterRect.top;
+                targetY = targetY - (timelineHeight / 2) + 50; 
+                
+            } else {
+                 console.warn("No se pudo encontrar el elemento DOM del ítem para el scroll vertical.");
+            }
+            
+            // **Paso 4: Ejecutar el movimiento vertical (Eje Y)**
+            if (targetY !== null) {
+                timeline.moveTo(null, {
+                    animation: { duration: 1200, easingFunction: "easeInOutQuad" },
+                    position: targetY
+                });
+            }
+
+        } catch (e) {
+            // El error ahora debería ocurrir solo si setWindow falla (poco probable)
+            console.error("Error crítico en la búsqueda final:", e);
+        }
+    }, 1000); 
+    
+    document.getElementById("modal-buscar").style.display = "none";
+}
+    // --- PANEL DETALLES ---
+   // --- PANEL DETALLES (CON AJUSTE DE ALTURA MÁXIMA) ---
+    const mostrarPanel = (id, p) => { 
+        const item = dataset.get(id);
+        if (!item) return;
+        const e = item._raw;
+
+        // Rellenar contenido (Tu código existente)
+        document.getElementById("detail-title").textContent = e.title;
+        let txt = formatYear(e.start.year);
+        if (e.end) txt += " → " + formatYear(e.end.year);
+        document.getElementById("detail-dates").textContent = txt;
+        document.getElementById("detail-category").innerHTML = `<strong>Categoría:</strong> ${e.category || "Sin categoría"}`;
+        const img = document.getElementById("detail-image");
+        if (e.image) { img.src = e.image; img.style.display = "block"; } else img.style.display = "none";
+        document.getElementById("detail-text").innerHTML = linkify(e.text);
+
+        // --- 🎯 AJUSTE DE ALTURA MÁXIMA ---
+        const padding = 20; 
+        const navbarHeight = 70; // Altura mínima que respetamos en la parte superior
+        
+        // 1. Calcular la altura máxima disponible en la ventana.
+        const maxHeightAvailable = window.innerHeight - navbarHeight - (padding * 2);
+        
+        // Aplicamos la altura máxima y permitimos scroll interno.
+        panel.style.maxHeight = `${maxHeightAvailable}px`;
+        panel.style.overflowY = 'auto'; // Permitir scroll vertical si excede maxHeight
+        // --- FIN AJUSTE DE ALTURA MÁXIMA ---
+
+        // Mostrar momentáneamente para medir el tamaño real
+        panel.style.visibility = 'hidden'; 
+        panel.style.display = 'block';
+        
+        const panelWidth = panel.offsetWidth;
+        const panelHeight = panel.offsetHeight; // Ahora, panelHeight respeta el maxHeight
+        
+        // Obtenemos las coordenadas del ratón
+        const mouseX = p.event.clientX;
+        const mouseY = p.event.clientY;
+        
+        // 1. Calcular LEFT (Posición X)
+        let leftPos = mouseX + padding; 
+
+        // Ajuste para evitar salirse por la derecha
+        const windowWidth = window.innerWidth;
+        if (leftPos + panelWidth + padding > windowWidth) {
+            // Si no cabe, intentamos colocarlo a la izquierda
+            leftPos = mouseX - panelWidth - padding;
+            if (leftPos < 0) {
+                leftPos = padding;
+            }
+        }
+
+        // 2. Calcular TOP (Posición Y)
+        // Centrar verticalmente respecto al puntero del mouse
+        let topPos = mouseY - (panelHeight / 2);
+
+        // Ajuste para que no se salga por arriba (mínimo 70px)
+        topPos = Math.max(navbarHeight, topPos); 
+        // Ajuste para que no se salga por abajo
+        // topPos solo necesita garantizar que el panel esté dentro del área visible
+        topPos = Math.min(topPos, window.innerHeight - panelHeight - padding);
+
+        // Aplicar las posiciones y reajustar visibilidad
+        panel.style.left = `${leftPos}px`;
+        panel.style.top = `${topPos}px`;
+        panel.style.visibility = 'visible'; 
+        
+        panel.style.opacity = 1;
+        panel.style.transform = "translateY(0)";
+    };
+
+    // ... (El resto de tu código, incluyendo ocultarPanel)
+
+    const ocultarPanel = () => {
+        panel.style.opacity = 0;
+        panel.style.transform = "translateY(10px)";
+        setTimeout(() => panel.style.display = "none", 250);
+    };
+
+    // --- FUNCIÓN CENTRAL DE CARGA (Filtro por Django API) ---
+    async function cargarEventos(categoryIds = null, initialLoad = false) {
+        let apiUrl = "/api/eventos/";
+        
+        if (categoryIds && categoryIds.length > 0) {
+            apiUrl += `?category_id=${categoryIds.join(',')}`;
+        }
+
+        try {
+            const r = await fetch(apiUrl);
+            if (!r.ok) throw new Error("Error en API");
+            const { events = [] } = await r.json();
+
+            // 1. Mapea y actualiza allItems
+            allItems = events.map(e => ({
+                id: e.id,
+                content: e.title,
+                start: crearFecha(e.start.year, e.start.month, e.start.day),
+                end: e.end ? crearFecha(e.end.year, e.end.month, e.end.day) : null,
+                group: e.category || "Sin categoría",
+                style: `background-color:${e.color};border-color:${e.color};`,
+                _raw: e
+            }));
+
+            // 2. Inicializa o actualiza el DataSet
+            if (initialLoad) {
+                // Si es la carga inicial, crea dataset y timeline
+                dataset = new vis.DataSet(allItems);
+                const grupos = new vis.DataSet([...new Set(allItems.map(i => i.group))].map(n => ({id: n, content: n})));
+
+                timeline = new vis.Timeline(container, dataset, grupos, {
+                    stack: true,
+                    zoomable: true,
+                    showCurrentTime: false,
+                    orientation: "both",
+                    minZoom: 1000 * 60 * 60 * 24 * 30,
+                    maxZoom: 1000 * 60 * 60 * 24 * 365 * 5000
+                });
+
+                // Attach listeners only on initial load
+                // NOTA: 'p' contiene el ID del ítem (p.item) y el evento del mouse (p.event)
+                timeline.on("itemover", p => { if (!panel.dataset.fijo) mostrarPanel(p.item, p); });
+                timeline.on("itemout", () => { if (!panel.dataset.fijo) ocultarPanel(); });
+                timeline.on("click", p => { if (p.item) { panel.dataset.fijo = "1"; mostrarPanel(p.item, p); } });
+                document.addEventListener("dblclick", () => { panel.dataset.fijo = ""; ocultarPanel(); });
+                
+            } else {
+                // Si es un filtro posterior, solo actualiza el dataset
+                dataset.clear();
+                dataset.add(allItems);
+
+                // Actualiza grupos por si un filtro cambió las categorías visibles
+                const grupos = new vis.DataSet([...new Set(allItems.map(i => i.group))].map(n => ({id: n, content: n})));
+                timeline.setGroups(grupos);
+            }
+
+            // 3. Ajusta la vista
+            timeline.redraw();
+            timeline.fit({ animation: true });
+
+        } catch (err) {
+            console.error("Error cargando eventos:", err);
+            container.innerHTML = "<p class='text-danger text-center'>Error al cargar los eventos</p>";
+        }
+    }
+    
+    // --- LÓGICA DE INICIALIZACIÓN ---
+    // Carga inicial de la línea de tiempo
+    await cargarEventos(null, true); 
+
+    // --- LISTENERS DE CATEGORÍAS (AHORA FUNCIONAN) ---
+    document.getElementById("btn-categorias")?.addEventListener("click", () => {
+        const lista = document.getElementById("lista-categorias");
+        lista.innerHTML = "";
+
+        // Obtener categorías únicas con su ID para el modal (de allItems, que es la data completa)
+        const catMap = {};
+        dataset.forEach(item => { // Usamos el dataset actual para evitar recrear la lista si es grande
+            const raw = item._raw;
+            if (raw.category_id) {
+                catMap[raw.category_id] = raw.category;
+            }
+        });
+        // Si tienes eventos sin categoría, se gestionan aquí
+        // Nota: Es mejor obtener esta lista de categorías de una API dedicada si la lista es estática y grande
+        
+        const cats = Object.entries(catMap).sort(([, a], [, b]) => a.localeCompare(b));
+
+        cats.forEach(([id, nombre]) => {
+            // Usa el ID como value, que es robusto
+            lista.innerHTML += `<label class="d-block mb-2"><input type="checkbox" class="me-2 chk-cat" value="${id}"> ${nombre}</label>`;
+        });
+
+        document.getElementById("modal-categorias").style.display = "block";
+    });
+
+    document.getElementById("btn-cats-todas")?.addEventListener("click", () => 
+        document.querySelectorAll(".chk-cat").forEach(c => c.checked = true)
+    );
+
+    document.getElementById("btn-cats-aplicar")?.addEventListener("click", async () => {
+        // Obtenemos los IDs seleccionados
+        const sel = Array.from(document.querySelectorAll(".chk-cat:checked")).map(c => c.value); 
+        
+        // Llamamos a la API con los filtros
+        await cargarEventos(sel); 
+        
+        document.getElementById("modal-categorias").style.display = "none";
+    });
+
+    // --- LISTENERS GENERALES ---
+    
+    document.getElementById("btn-fit")?.addEventListener("click", async () => {
+        // Recarga sin filtros para ver todo
+        await cargarEventos(); 
+    });
+
+    document.getElementById("btn-dark")?.addEventListener("click", () => 
+        document.body.classList.toggle("dark-mode")
+    );
+
+    // --- BÚSQUEDA ---
+    const modalBuscar   = document.getElementById("modal-buscar");
+    const inputBuscar   = document.getElementById("input-buscar");
+    const resultadosDiv = document.getElementById("resultados-buscar");
+
+    document.getElementById("btn-buscar")?.addEventListener("click", () => {
+        inputBuscar.value = "";
+        resultadosDiv.innerHTML = "";
+        modalBuscar.style.display = "block";
+        setTimeout(() => inputBuscar.focus(), 100);
+    });
+
+    modalBuscar.onclick = e => { if (e.target === modalBuscar) modalBuscar.style.display = "none"; };
+
+    const highlight = (text, query) => {
+        if (!query) return text;
+        const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+        return text.replace(regex, '<strong style="color:#0d6efd">$1</strong>');
+    };
+
+    inputBuscar.addEventListener("input", () => {
+        const q = inputBuscar.value.trim();
+        resultadosDiv.innerHTML = "";
+
+        if (q.length < 2) {
+            resultadosDiv.innerHTML = '<small class="text-muted px-3">Escribe al menos 2 letras...</small>';
+            return;
+        }
+        
+        // La búsqueda solo se hace sobre los ítems cargados actualmente
+        const matches = allItems 
+            .filter(item => item.content.toLowerCase().includes(q.toLowerCase()))
+            .slice(0, 15);
+
+        if (matches.length === 0) {
+            resultadosDiv.innerHTML = '<small class="text-muted px-3">Sin resultados</small>';
+            return;
+        }
+
+        matches.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "resultado-buscar d-flex justify-content-between align-items-center";
+            div.style.padding = "12px 16px";
+            div.style.borderBottom = "1px solid #eee";
+            div.style.cursor = "pointer";
+            div.innerHTML = `
+                <span>${highlight(item.content, q)}</span>
+                <small class="text-muted">
+                    ${formatYear(item._raw.start.year)} 
+                    ${item.group !== "Sin categoría" ? " • " + item.group : ""}
+                </small>
+            `;
+
+            div.onclick = () => seleccionarResultado(item.id, item.group);
+            div.onmouseenter = () => div.style.backgroundColor = "#f8f9fa";
+            div.onmouseleave = () => div.style.backgroundColor = "";
+
+            resultadosDiv.appendChild(div);
+        });
+    });
+
+    // Cerrar con Escape
+    document.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+            document.querySelectorAll(".modal-categorias").forEach(m => m.style.display = "none");
+        }
+    });
+
+});
+</script>
+{% endblock %}
