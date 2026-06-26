@@ -131,7 +131,10 @@
     <div class="header-icon">⏳</div>
     <span class="header-title">Línea de Tiempo</span>
   </div>
-  <span id="ev-count">0 eventos</span>
+  <div style="display:flex;align-items:center;gap:16px">
+    <span id="sync-status" style="font-size:12px;color:var(--text2);cursor:default;transition:color 0.3s">⏳ Iniciando...</span>
+    <span id="ev-count" style="font-size:12px;color:var(--text2)">0 eventos</span>
+  </div>
 </header>
 
 <nav>
@@ -208,7 +211,7 @@
             <option value="bce">a.e.C.</option>
           </select>
         </div>
-        <div class="form-hint">Mes y día opcionales abajo</div>
+        <div class="form-hint">Mes y día opcionales: formato MM-DD (ej: 11-13 = 13 de noviembre)</div>
       </div>
       <div class="form-group">
         <label class="form-label">Mes-Día inicio</label>
@@ -270,13 +273,24 @@
   </div>
 </div>
 
+<!-- Google API -->
+<script src="https://apis.google.com/js/api.js"></script>
+<script src="https://accounts.google.com/gsi/client"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
 <script>
-const SK_EVENTS = 'lt_events_v1';
-const SK_CATS   = 'lt_cats_v1';
+// ── CONFIGURACIÓN GOOGLE DRIVE ──────────────────────────────────────────────
+// Para usar esta app necesitás crear un proyecto en Google Cloud Console y
+// habilitar la API de Drive. Ver instrucciones al pie del archivo.
+const GDRIVE_FILE_ID  = '1ZOc6T3Lh1PhnsKm-H2OV0KPCLg72-WV3';
+const CLIENT_ID       = '92501134025-40e7ocf4v8q49qje6l76m8v2001qq1u7.apps.googleusercontent.com';
+const API_KEY         = 'AIzaSyBq6sYrlF71lRGinSmWPjKvmDr22W5Fk3E';
+const SCOPES          = 'https://www.googleapis.com/auth/drive.file';
+// ────────────────────────────────────────────────────────────────────────────
 
 let events = [], cats = [], editEvId = null, editCatId = null;
 let searchQ = '', filterCat = '', tlCatFilter = 'all', tlInstance = null;
+let gapiReady = false, gisReady = false, tokenClient = null;
+let saveTimer = null, pendingSave = false, saving = false;
 
 const DEFAULT_CATS = [
   { id: 1, name: 'Personal', color: '#378ADD' },
@@ -288,21 +302,155 @@ const DEFAULT_EVENTS = [
   { id: 3, title: 'Ministerio de Jesús', desc: 'Vida y ministerio de Jesús de Nazaret', startYear: -4, endYear: 30, catId: 2 },
 ];
 
-function load() {
-  try { cats   = JSON.parse(localStorage.getItem(SK_CATS))   || DEFAULT_CATS;   } catch { cats   = DEFAULT_CATS;   }
-  try { events = JSON.parse(localStorage.getItem(SK_EVENTS)) || DEFAULT_EVENTS; } catch { events = DEFAULT_EVENTS; }
+// ── ESTADO DE SYNC ──────────────────────────────────────────────────────────
+function setSyncStatus(state, msg) {
+  // state: 'ok' | 'saving' | 'error' | 'offline' | 'auth'
+  const el = document.getElementById('sync-status');
+  const icons = { ok:'✅', saving:'⏳', error:'❌', offline:'💾', auth:'🔑' };
+  const colors = { ok:'#1D9E75', saving:'#c4a35a', error:'#e05555', offline:'#888', auth:'#8b5cf6' };
+  el.textContent = `${icons[state]} ${msg}`;
+  el.style.color = colors[state];
+}
+
+// ── GOOGLE API INIT ─────────────────────────────────────────────────────────
+function gapiLoaded() {
+  gapi.load('client', async () => {
+    await gapi.client.init({ apiKey: API_KEY, discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'] });
+    gapiReady = true;
+    maybeLoadData();
+  });
+}
+
+function gisLoaded() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    callback: async (resp) => {
+      if (resp.error) { setSyncStatus('error', 'Error de autenticación'); return; }
+      setSyncStatus('saving', 'Cargando datos...');
+      await loadFromDrive();
+    },
+  });
+  gisReady = true;
+  maybeLoadData();
+}
+
+function maybeLoadData() {
+  if (!gapiReady || !gisReady) return;
+  // Intentar cargar sin pedir login (token previo en memoria)
+  if (gapi.client.getToken() === null) {
+    // No hay token → cargar desde localStorage y pedir auth
+    loadFromLocal();
+    setSyncStatus('auth', 'Clic para sincronizar con Drive');
+    document.getElementById('sync-status').style.cursor = 'pointer';
+    document.getElementById('sync-status').onclick = requestAuth;
+  } else {
+    loadFromDrive();
+  }
+}
+
+function requestAuth() {
+  tokenClient.requestAccessToken({ prompt: '' });
+}
+
+// ── CARGAR DATOS ────────────────────────────────────────────────────────────
+async function loadFromDrive() {
+  try {
+    setSyncStatus('saving', 'Cargando desde Drive...');
+    const res = await gapi.client.drive.files.get({
+      fileId: GDRIVE_FILE_ID,
+      alt: 'media'
+    });
+    const data = typeof res.result === 'string' ? JSON.parse(res.result) : res.result;
+    cats   = data.cats   || DEFAULT_CATS;
+    events = data.events || DEFAULT_EVENTS;
+    // También guardar localmente como cache
+    localStorage.setItem('lt_cache', JSON.stringify({ cats, events }));
+    setSyncStatus('ok', 'Sincronizado con Drive');
+    renderAll();
+  } catch(e) {
+    console.error('Error cargando Drive:', e);
+    setSyncStatus('error', 'Error al cargar — usando cache local');
+    loadFromLocal();
+  }
+}
+
+function loadFromLocal() {
+  try {
+    const cache = JSON.parse(localStorage.getItem('lt_cache'));
+    if (cache) { cats = cache.cats; events = cache.events; }
+    else { cats = DEFAULT_CATS; events = DEFAULT_EVENTS; }
+  } catch { cats = DEFAULT_CATS; events = DEFAULT_EVENTS; }
+  setSyncStatus('offline', 'Sin conexión a Drive (datos locales)');
   renderAll();
 }
 
-function save() {
-  localStorage.setItem(SK_CATS,   JSON.stringify(cats));
-  localStorage.setItem(SK_EVENTS, JSON.stringify(events));
+// ── GUARDAR DATOS ───────────────────────────────────────────────────────────
+// Autosave: espera 2 segundos de inactividad antes de guardar
+function scheduleSave() {
+  localStorage.setItem('lt_cache', JSON.stringify({ cats, events })); // siempre guardar local
+  pendingSave = true;
+  clearTimeout(saveTimer);
+  setSyncStatus('saving', 'Guardando...');
+  saveTimer = setTimeout(() => flushSave(), 2000);
 }
 
+async function flushSave() {
+  if (!pendingSave || saving) return;
+  if (!gapiReady || gapi.client.getToken() === null) {
+    setSyncStatus('offline', 'Guardado local (no autenticado)');
+    pendingSave = false;
+    return;
+  }
+  saving = true;
+  pendingSave = false;
+  try {
+    const body = JSON.stringify({ cats, events });
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${GDRIVE_FILE_ID}?uploadType=media`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${gapi.client.getToken().access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body
+    });
+    setSyncStatus('ok', `Guardado en Drive — ${new Date().toLocaleTimeString('es-AR', {hour:'2-digit',minute:'2-digit'})}`);
+  } catch(e) {
+    setSyncStatus('error', 'Error al guardar en Drive');
+    pendingSave = true; // reintentar
+    saveTimer = setTimeout(() => flushSave(), 5000);
+  } finally {
+    saving = false;
+  }
+}
+
+// Guardar antes de cerrar la pestaña
+window.addEventListener('beforeunload', (e) => {
+  if (pendingSave) {
+    flushSave(); // intento síncrono de último momento
+  }
+});
+
+// También guardar periódicamente cada 30s si hay cambios pendientes
+setInterval(() => { if (pendingSave) flushSave(); }, 30000);
+
+function save() { scheduleSave(); }
+
 function makeDate(year, md) {
-  const d = md && /^\d{2}-\d{2}$/.test(md) ? md : '06-15';
-  const abs = String(Math.abs(year)).padStart(4, '0');
-  return new Date(`${year < 0 ? '-' : ''}${abs}-${d}`);
+  // Vis.js tiene un bug conocido con fechas negativas usando string ISO.
+  // La solución correcta es usar Date.UTC directamente.
+  let month = 6, day = 15;
+  if (md && /^\d{2}-\d{2}$/.test(md)) {
+    const parts = md.split('-');
+    month = parseInt(parts[0], 10);
+    day   = parseInt(parts[1], 10);
+  }
+  // Para años a.e.C. usamos setFullYear después de crear la fecha,
+  // porque el constructor de Date no maneja bien años < 100 ni negativos vía string.
+  const d = new Date(0);
+  d.setUTCFullYear(year, month - 1, day);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
 function displayYear(y) {
@@ -334,17 +482,21 @@ function renderTimeline() {
   const items = new vis.DataSet(filtered.map(e => {
     const cat = getCat(e.catId);
     const color = cat ? cat.color : '#888';
+    const startDate = makeDate(e.startYear, e.startMD);
+    const hasRange = e.endYear != null && !(e.endYear === e.startYear && e.endMD === e.startMD);
+    const endDate = hasRange ? makeDate(e.endYear, e.endMD) : undefined;
     return {
       id: e.id,
       content: `<span style="font-size:12px;font-weight:500;font-family:'DM Sans',sans-serif">${e.title}</span>`,
-      start: makeDate(e.startYear, e.startMD),
-      end: e.endYear != null ? makeDate(e.endYear, e.endMD) : undefined,
-      title: `<b>${e.title}</b><br>${displayYear(e.startYear)}${e.endYear != null ? ' → ' + displayYear(e.endYear) : ''}${e.desc ? '<br><span style="color:#aaa">' + e.desc + '</span>' : ''}`,
+      start: startDate,
+      end: endDate,
+      type: hasRange ? 'range' : 'point',
+      title: `<b>${e.title}</b><br>${displayYear(e.startYear)}${hasRange ? ' -> ' + displayYear(e.endYear) : ''}${e.desc ? '<br><span style="color:#aaa">' + e.desc + '</span>' : ''}`,
       style: `background:${color}22;border-color:${color};color:${color};border-radius:4px;padding:2px 8px;font-family:'DM Sans',sans-serif;`
     };
   }));
   const container = document.getElementById('vis-container');
-  const opts = { height: '380px', zoomMin: 1000*60*60*24*30, zoomMax: 1000*60*60*24*365*8000, moveable: true, showCurrentTime: false };
+  const opts = { height: '380px', zoomMin: 1000*60*60*24*30, zoomMax: 1000*60*60*24*365.25*10000, moveable: true, showCurrentTime: false };
   if (tlInstance) {
     tlInstance.setItems(items);
     if (filtered.length) setTimeout(() => tlInstance.fit(), 100);
@@ -508,7 +660,30 @@ function deleteCat(id) {
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 function handleBdClick(e, id) { if (e.target === document.getElementById(id)) closeModal(id); }
 
-load();
+// Callbacks que llama Google API automáticamente al cargar los scripts
+window.gapiLoaded = gapiLoaded;
+window.gisLoaded  = gisLoaded;
 </script>
+
+<!-- Cargar Google API (los onload llaman a gapiLoaded/gisLoaded) -->
+<script src="https://apis.google.com/js/api.js?onload=gapiLoaded" async defer></script>
+<script src="https://accounts.google.com/gsi/client" onload="gisLoaded" async defer></script>
+
+<!--
+════════════════════════════════════════════════════════════
+  INSTRUCCIONES PARA CONFIGURAR GOOGLE DRIVE
+════════════════════════════════════════════════════════════
+  1. Ir a: https://console.cloud.google.com/
+  2. Crear un proyecto nuevo (o usar uno existente)
+  3. Habilitar "Google Drive API" en "APIs y servicios"
+  4. En "Credenciales" → Crear:
+       a) API Key  → copiar en CLIENT_ID de arriba
+       b) OAuth 2.0 Client ID (tipo: Aplicación web)
+           - Agregar en "Orígenes autorizados": la URL donde tenés la app
+             (ej: https://mauro-78.github.io)
+           - Copiar el Client ID en la variable CLIENT_ID de arriba
+  5. Reemplazar TU_CLIENT_ID_AQUI y TU_API_KEY_AQUI en el JS
+════════════════════════════════════════════════════════════
+-->
 </body>
 </html>
